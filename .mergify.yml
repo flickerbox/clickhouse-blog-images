@@ -1,7 +1,8 @@
 pull_request_rules:
   - name: Automatic merge for ImgBot pull requests
     conditions:
-      - author=imgbot[bot]
+      - "author~=^imgbot.*$"
+      - "base=master"
     actions:
       merge:
         method: merge
