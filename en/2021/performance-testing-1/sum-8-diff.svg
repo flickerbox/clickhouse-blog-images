@@ -1,0 +1,812 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="454" onload="init(evt)" viewBox="0 0 1200 454" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+	}
+
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom();
+			zoom(target);
+		}
+		else if (e.target.id == "unzoom") unzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+	}, false)
+
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+		return;
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		// Fit in full text width
+		if (/^ *$/.test(txt) || t.getSubStringLength(0, txt.length) < w)
+			return;
+
+		for (var x = txt.length - 2; x > 0; x--) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom() {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			update_text(el[i]);
+		}
+		search();
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) {
+				currentSearchTerm = term;
+				search();
+			}
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (currentSearchTerm === null) return;
+		var term = currentSearchTerm;
+
+		var re = new RegExp(term, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="454.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="437" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="437" > </text>
+<g id="frames">
+<g >
+<title>clickhouse#DB::TCPHandler::processOrdinaryQueryWithProcessors() (457 samples, 51.00%; 0.00%)</title><rect x="15.3" y="261" width="601.8" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="18.27" y="271.5" >clickhouse#DB::TCPHandler::processOrdinaryQueryWithProcessors()</text>
+</g>
+<g >
+<title>clickhouse#DB::ColumnVector&lt;unsigned long&gt;::~ColumnVector() (1 samples, 0.11%; 0.00%)</title><rect x="850.2" y="197" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="853.22" y="207.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::LimitTransform::splitChunk(DB::LimitTransform::PortsData&amp;) (1 samples, 0.11%; 0.00%)</title><rect x="627.7" y="165" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="630.66" y="175.5" ></text>
+</g>
+<g >
+<title>syscall.S:38#syscall (1 samples, 0.11%; +0.11%)</title><rect x="617.1" y="229" width="1.3" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="620.12" y="239.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::QueryProfilerReal::signalHandler(int, siginfo_t*, void*) (86 samples, 9.60%; +6.14%)</title><rect x="1076.7" y="373" width="113.3" height="15.0" fill="rgb(255,123,123)" rx="2" ry="2" />
+<text  x="1079.74" y="383.5" >clickhouse#DB..</text>
+</g>
+<g >
+<title>clickhouse#ThreadPoolImpl&lt;std::__1::thread&gt;::worker(std::__1::__list_iterator&lt;std::__1::thread, void*&gt;) (349 samples, 38.95%; 0.00%)</title><rect x="617.1" y="341" width="459.6" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="620.12" y="351.5" >clickhouse#ThreadPoolImpl&lt;std::__1::thread&gt;::worker(std::__1::..</text>
+</g>
+<g >
+<title>clickhouse#DB::CurrentThread::attachTo(std::__1::shared_ptr&lt;DB::ThreadGroupStatus&gt; const&amp;) (1 samples, 0.11%; 0.00%)</title><rect x="617.1" y="309" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="620.12" y="319.5" ></text>
+</g>
+<g >
+<title>clickhouse#arena_extent_alloc_large (2 samples, 0.22%; 0.00%)</title><rect x="1055.7" y="117" width="2.6" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="1058.67" y="127.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::PipelineExecutor::executeImpl(unsigned long) (348 samples, 38.84%; 0.00%)</title><rect x="618.4" y="293" width="458.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="621.44" y="303.5" >clickhouse#DB::PipelineExecutor::executeImpl(unsigned long)</text>
+</g>
+<g >
+<title>clickhouse#DB::ISource::prepare() (1 samples, 0.11%; 0.00%)</title><rect x="623.7" y="245" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="626.71" y="255.5" ></text>
+</g>
+<g >
+<title>clickhouse#void std::__1::__function::__policy_invoker&lt;void ()&gt;::__call_impl&lt;std::__1::__function::__default_alloc_func&lt;ThreadFromGlobalPool::ThreadFromGlobalPool&lt;DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&amp;, unsigned long)::$_0&gt;(DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&amp;, unsigned long)::$_0&amp;&amp;)::\'lambda\'(), void ()&gt; &gt;(std::__1::__function::__policy_storage const*) (349 samples, 38.95%; 0.00%)</title><rect x="617.1" y="325" width="459.6" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="620.12" y="335.5" >clickhouse#void std::__1::__function::__policy_invoker&lt;void ()..</text>
+</g>
+<g >
+<title>clickhouse#DB::ThreadStatus::initPerformanceCounters() (1 samples, 0.11%; 0.00%)</title><rect x="617.1" y="277" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="620.12" y="287.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&amp;, unsigned long) (457 samples, 51.00%; 0.00%)</title><rect x="15.3" y="229" width="601.8" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="18.27" y="239.5" >clickhouse#DB::PullingAsyncPipelineExecutor::pull(DB::Chunk&amp;, unsigned long)</text>
+</g>
+<g >
+<title>clickhouse#DB::ExpressionActions::execute(DB::Block&amp;, unsigned long&amp;, bool) const (18 samples, 2.01%; +0.11%)</title><rect x="852.9" y="197" width="23.7" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="855.86" y="207.5" >c..</text>
+</g>
+<g >
+<title>clickhouse#arena_extent_alloc_large (1 samples, 0.11%; 0.00%)</title><rect x="859.4" y="53" width="1.4" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="862.44" y="63.5" ></text>
+</g>
+<g >
+<title>clickhouse#void* std::__1::__thread_proxy&lt;std::__1::tuple&lt;std::__1::unique_ptr&lt;std::__1::__thread_struct, std::__1::default_delete&lt;std::__1::__thread_struct&gt; &gt;, void ThreadPoolImpl&lt;std::__1::thread&gt;::scheduleImpl&lt;void&gt;(std::__1::function&lt;void ()&gt;, int, std::__1::optional&lt;unsigned long&gt;)::\'lambda0\'()&gt; &gt;(void*) (349 samples, 38.95%; 0.00%)</title><rect x="617.1" y="357" width="459.6" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="620.12" y="367.5" >clickhouse#void* std::__1::__thread_proxy&lt;std::__1::tuple&lt;std:..</text>
+</g>
+<g >
+<title>clickhouse#DB::SourceWithProgress::work() (152 samples, 16.96%; 0.00%)</title><rect x="876.6" y="245" width="200.1" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="879.56" y="255.5" >clickhouse#DB::SourceWithP..</text>
+</g>
+<g >
+<title>clickhouse#DB::LimitTransform::prepare(std::__1::vector&lt;unsigned long, std::__1::allocator&lt;unsigned long&gt; &gt; const&amp;, std::__1::vector&lt;unsigned long, std::__1::allocator&lt;unsigned long&gt; &gt; const&amp;) (2 samples, 0.22%; 0.00%)</title><rect x="626.3" y="213" width="2.7" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="629.34" y="223.5" ></text>
+</g>
+<g >
+<title>clickhouse#extent_recycle.llvm.1754257577532563842 (1 samples, 0.11%; 0.00%)</title><rect x="859.4" y="37" width="1.4" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="862.44" y="47.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::IExecutableFunction::executeWithoutLowCardinalityColumns(std::__1::vector&lt;DB::ColumnWithTypeAndName, std::__1::allocator&lt;DB::ColumnWithTypeAndName&gt; &gt; const&amp;, std::__1::shared_ptr&lt;DB::IDataType const&gt; const&amp;, unsigned long, bool) const (12 samples, 1.34%; 0.00%)</title><rect x="858.1" y="165" width="15.8" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="861.13" y="175.5" ></text>
+</g>
+<g >
+<title>clickhouse#extents_insert_locked.llvm.1754257577532563842 (1 samples, 0.11%; +0.11%)</title><rect x="850.2" y="117" width="1.3" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="853.22" y="127.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::PipelineExecutor::tryAddProcessorToStackIfUpdated(DB::ExecutingGraph::Edge&amp;, std::__1::queue&lt;DB::ExecutingGraph::Node*, std::__1::deque&lt;DB::ExecutingGraph::Node*, std::__1::allocator&lt;DB::ExecutingGraph::Node*&gt; &gt; &gt;&amp;, std::__1::queue&lt;DB::ExecutingGraph::Node*, std::__1::deque&lt;DB::ExecutingGraph::Node*, std::__1::allocator&lt;DB::ExecutingGraph::Node*&gt; &gt; &gt;&amp;, unsigned long) (2 samples, 0.22%; 0.00%)</title><rect x="629.0" y="213" width="2.6" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="631.97" y="223.5" ></text>
+</g>
+<g >
+<title>syscall.s:14# (2 samples, 0.22%; 0.00%)</title><rect x="1062.3" y="133" width="2.6" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="1065.25" y="143.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::AggregatingTransform::work() (164 samples, 18.30%; 0.00%)</title><rect x="635.6" y="245" width="215.9" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="638.56" y="255.5" >clickhouse#DB::AggregatingTr..</text>
+</g>
+<g >
+<title>clickhouse#DB::PullingAsyncPipelineExecutor::pull(DB::Block&amp;, unsigned long) (457 samples, 51.00%; 0.00%)</title><rect x="15.3" y="245" width="601.8" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="18.27" y="255.5" >clickhouse#DB::PullingAsyncPipelineExecutor::pull(DB::Block&amp;, unsigned long)</text>
+</g>
+<g >
+<title>clickhouse#DB::ISimpleTransform::transform(DB::Chunk&amp;, DB::Chunk&amp;) (19 samples, 2.12%; 0.00%)</title><rect x="851.5" y="229" width="25.1" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="854.54" y="239.5" >c..</text>
+</g>
+<g >
+<title>clickhouse#DB::PipelineExecutor::tryAddProcessorToStackIfUpdated(DB::ExecutingGraph::Edge&amp;, std::__1::queue&lt;DB::ExecutingGraph::Node*, std::__1::deque&lt;DB::ExecutingGraph::Node*, std::__1::allocator&lt;DB::ExecutingGraph::Node*&gt; &gt; &gt;&amp;, std::__1::queue&lt;DB::ExecutingGraph::Node*, std::__1::deque&lt;DB::ExecutingGraph::Node*, std::__1::allocator&lt;DB::ExecutingGraph::Node*&gt; &gt; &gt;&amp;, unsigned long) (7 samples, 0.78%; 0.00%)</title><rect x="625.0" y="245" width="9.2" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="628.02" y="255.5" ></text>
+</g>
+<g >
+<title>clickhouse#Poco::Net::TCPServerConnection::start() (457 samples, 51.00%; 0.00%)</title><rect x="15.3" y="309" width="601.8" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="18.27" y="319.5" >clickhouse#Poco::Net::TCPServerConnection::start()</text>
+</g>
+<g >
+<title>clickhouse#Poco::Net::TCPServerDispatcher::run() (457 samples, 51.00%; 0.00%)</title><rect x="15.3" y="325" width="601.8" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="18.27" y="335.5" >clickhouse#Poco::Net::TCPServerDispatcher::run()</text>
+</g>
+<g >
+<title>clickhouse#malloc_default (1 samples, 0.11%; 0.00%)</title><rect x="859.4" y="85" width="1.4" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="862.44" y="95.5" ></text>
+</g>
+<g >
+<title>libpthread-2.27.so# (86 samples, 9.60%; 0.00%)</title><rect x="1076.7" y="389" width="113.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="1079.74" y="399.5" >libpthread-2...</text>
+</g>
+<g >
+<title>clickhouse#DB::ColumnNullable::~ColumnNullable() (1 samples, 0.11%; +0.11%)</title><rect x="10.0" y="389" width="1.3" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="13.00" y="399.5" ></text>
+</g>
+<g >
+<title>clickhouse#Allocator&lt;false, false&gt;::free(void*, unsigned long) (1 samples, 0.11%; 0.00%)</title><rect x="850.2" y="181" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="853.22" y="191.5" ></text>
+</g>
+<g >
+<title>clickhouse#large_palloc (1 samples, 0.11%; 0.00%)</title><rect x="859.4" y="69" width="1.4" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="862.44" y="79.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::(anonymous namespace)::NumbersSource::generate() (146 samples, 16.29%; 0.00%)</title><rect x="876.6" y="197" width="192.2" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="879.56" y="207.5" >clickhouse#DB::(anonymous..</text>
+</g>
+<g >
+<title>clickhouse#std::__1::pair&lt;std::__1::__hash_iterator&lt;std::__1::__hash_node&lt;std::__1::__hash_value_type&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, unsigned long&gt;, void*&gt;*&gt;, bool&gt; std::__1::__hash_table&lt;std::__1::__hash_value_type&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, unsigned long&gt;, std::__1::__unordered_map_hasher&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, std::__1::__hash_value_type&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, unsigned long&gt;, std::__1::hash&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; &gt;, std::__1::equal_to&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; &gt;, true&gt;, std::__1::__unordered_map_equal&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, std::__1::__hash_value_type&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, unsigned long&gt;, std::__1::equal_to&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; &gt;, std::__1::hash&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; &gt;, true&gt;, std::__1::allocator&lt;std::__1::__hash_value_type&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, unsigned long&gt; &gt; &gt;::__emplace_unique_key_args&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; const&amp;, unsigned long&gt;(std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; const&amp;, std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; const&amp;, unsigned long&amp;&amp;) (1 samples, 0.11%; +0.11%)</title><rect x="873.9" y="181" width="1.3" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="876.93" y="191.5" ></text>
+</g>
+<g >
+<title>clickhouse#ConcurrentBoundedQueue&lt;DB::Chunk&gt;::tryPop(DB::Chunk&amp;, unsigned long) (457 samples, 51.00%; 0.00%)</title><rect x="15.3" y="197" width="601.8" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="18.27" y="207.5" >clickhouse#ConcurrentBoundedQueue&lt;DB::Chunk&gt;::tryPop(DB::Chunk&amp;, unsigned long)</text>
+</g>
+<g >
+<title>clickhouse#DB::Block::cloneWithColumns(std::__1::vector&lt;COW&lt;DB::IColumn&gt;::immutable_ptr&lt;DB::IColumn&gt;, std::__1::allocator&lt;COW&lt;DB::IColumn&gt;::immutable_ptr&lt;DB::IColumn&gt; &gt; &gt; const&amp;) const (1 samples, 0.11%; 0.00%)</title><rect x="851.5" y="197" width="1.4" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="854.54" y="207.5" ></text>
+</g>
+<g >
+<title>clickhouse#Poco::PooledThread::run() (457 samples, 51.00%; 0.00%)</title><rect x="15.3" y="341" width="601.8" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="18.27" y="351.5" >clickhouse#Poco::PooledThread::run()</text>
+</g>
+<g >
+<title>clickhouse#Poco::SemaphoreImpl::waitImpl(long) (457 samples, 51.00%; 0.00%)</title><rect x="15.3" y="181" width="601.8" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="18.27" y="191.5" >clickhouse#Poco::SemaphoreImpl::waitImpl(long)</text>
+</g>
+<g >
+<title>clickhouse#DB::ISimpleTransform::prepare() (1 samples, 0.11%; 0.00%)</title><rect x="622.4" y="245" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="625.39" y="255.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::PipelineExecutor::execute(unsigned long) (348 samples, 38.84%; 0.00%)</title><rect x="618.4" y="309" width="458.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="621.44" y="319.5" >clickhouse#DB::PipelineExecutor::execute(unsigned long)</text>
+</g>
+<g >
+<title>clickhouse#DB::LimitTransform::prepare(std::__1::vector&lt;unsigned long, std::__1::allocator&lt;unsigned long&gt; &gt; const&amp;, std::__1::vector&lt;unsigned long, std::__1::allocator&lt;unsigned long&gt; &gt; const&amp;)::$_0::operator()(unsigned long) const (2 samples, 0.22%; +0.11%)</title><rect x="626.3" y="197" width="2.7" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="629.34" y="207.5" ></text>
+</g>
+<g >
+<title>syscall.s:14# (6 samples, 0.67%; +0.67%)</title><rect x="1068.8" y="229" width="7.9" height="15.0" fill="rgb(255,200,200)" rx="2" ry="2" />
+<text  x="1071.84" y="239.5" ></text>
+</g>
+<g >
+<title>clickhouse#operator delete(void*, unsigned long) (1 samples, 0.11%; +0.11%)</title><rect x="631.6" y="213" width="1.3" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="634.61" y="223.5" ></text>
+</g>
+<g >
+<title>clickhouse#__libc_malloc (1 samples, 0.11%; +0.11%)</title><rect x="860.8" y="101" width="1.3" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="863.76" y="111.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::PipelineExecutor::executeStepImpl(unsigned long, unsigned long, std::__1::atomic&lt;bool&gt;*) (348 samples, 38.84%; +0.11%)</title><rect x="618.4" y="277" width="458.3" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="621.44" y="287.5" >clickhouse#DB::PipelineExecutor::executeStepImpl(unsigned long..</text>
+</g>
+<g >
+<title>libpthread-2.27.so#start_thread (806 samples, 89.96%; 0.00%)</title><rect x="15.3" y="373" width="1061.4" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="18.27" y="383.5" >libpthread-2.27.so#start_thread</text>
+</g>
+<g >
+<title>syscall.s:14# (2 samples, 0.22%; +0.11%)</title><rect x="1066.2" y="165" width="2.6" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="1069.21" y="175.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::TCPHandler::runImpl() (457 samples, 51.00%; 0.00%)</title><rect x="15.3" y="277" width="601.8" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="18.27" y="287.5" >clickhouse#DB::TCPHandler::runImpl()</text>
+</g>
+<g >
+<title>clickhouse#DB::injection(double, double, double, double) (.llvm.5241158297062424806) (2 samples, 0.22%; +0.22%)</title><rect x="12.6" y="389" width="2.7" height="15.0" fill="rgb(255,206,206)" rx="2" ry="2" />
+<text  x="15.63" y="399.5" ></text>
+</g>
+<g >
+<title>clickhouse#void std::__1::__function::__policy_invoker&lt;void ()&gt;::__call_impl&lt;std::__1::__function::__default_alloc_func&lt;DB::PipelineExecutor::addJob(DB::ExecutingGraph::Node*)::$_0, void ()&gt; &gt;(std::__1::__function::__policy_storage const*) (336 samples, 37.50%; +0.11%)</title><rect x="634.2" y="261" width="442.5" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="637.24" y="271.5" >clickhouse#void std::__1::__function::__policy_invoker&lt;void ..</text>
+</g>
+<g >
+<title>clone.S (filtered by script) (806 samples, 89.96%; 0.00%)</title><rect x="15.3" y="389" width="1061.4" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="18.27" y="399.5" >clone.S (filtered by script)</text>
+</g>
+<g >
+<title>clickhouse#DB::ISimpleTransform::work() (19 samples, 2.12%; 0.00%)</title><rect x="851.5" y="245" width="25.1" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="854.54" y="255.5" >c..</text>
+</g>
+<g >
+<title>clickhouse#memcpy (1 samples, 0.11%; +0.11%)</title><rect x="627.7" y="133" width="1.3" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="630.66" y="143.5" ></text>
+</g>
+<g >
+<title>clickhouse#Poco::ThreadImpl::runnableEntry(void*) (457 samples, 51.00%; 0.00%)</title><rect x="15.3" y="357" width="601.8" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="18.27" y="367.5" >clickhouse#Poco::ThreadImpl::runnableEntry(void*)</text>
+</g>
+<g >
+<title>clickhouse#void DB::PODArray&lt;char8_t, 4096ul, Allocator&lt;false, false&gt;, 15ul, 16ul&gt;::assign&lt;&gt;(unsigned long, char8_t const&amp;) (9 samples, 1.00%; -1.23%)</title><rect x="862.1" y="101" width="11.8" height="15.0" fill="rgb(192,192,255)" rx="2" ry="2" />
+<text  x="865.08" y="111.5" ></text>
+</g>
+<g >
+<title>pthread_cond_timedwait (filtered by script) (457 samples, 51.00%; -10.49%)</title><rect x="15.3" y="165" width="601.8" height="15.0" fill="rgb(61,61,255)" rx="2" ry="2" />
+<text  x="18.27" y="175.5" >pthread_cond_timedwait (filtered by script)</text>
+</g>
+<g >
+<title>clickhouse#DB::ThreadStatus::setupState(std::__1::shared_ptr&lt;DB::ThreadGroupStatus&gt; const&amp;) (1 samples, 0.11%; 0.00%)</title><rect x="617.1" y="293" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="620.12" y="303.5" ></text>
+</g>
+<g >
+<title>clickhouse#__libc_malloc (1 samples, 0.11%; +0.11%)</title><rect x="632.9" y="197" width="1.3" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="635.92" y="207.5" ></text>
+</g>
+<g >
+<title>clickhouse#malloc_default (2 samples, 0.22%; 0.00%)</title><rect x="1055.7" y="149" width="2.6" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="1058.67" y="159.5" ></text>
+</g>
+<g >
+<title>clickhouse#void DB::AggregateFunctionSumData&lt;unsigned long&gt;::addManyNotNull&lt;unsigned long&gt;(unsigned long const*, char8_t const*, unsigned long) (160 samples, 17.86%; -14.84%)</title><rect x="636.9" y="165" width="210.7" height="15.0" fill="rgb(0,0,255)" rx="2" ry="2" />
+<text  x="639.88" y="175.5" >clickhouse#void DB::Aggrega..</text>
+</g>
+<g >
+<title>clickhouse#Allocator&lt;false, false&gt;::allocNoTrack(unsigned long, unsigned long) (2 samples, 0.22%; 0.00%)</title><rect x="1055.7" y="165" width="2.6" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="1058.67" y="175.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::PipelineExecutor::prepareProcessor(unsigned long, unsigned long, std::__1::queue&lt;DB::ExecutingGraph::Node*, std::__1::deque&lt;DB::ExecutingGraph::Node*, std::__1::allocator&lt;DB::ExecutingGraph::Node*&gt; &gt; &gt;&amp;, std::__1::queue&lt;DB::ExecutingGraph::Node*, std::__1::deque&lt;DB::ExecutingGraph::Node*, std::__1::allocator&lt;DB::ExecutingGraph::Node*&gt; &gt; &gt;&amp;, std::__1::unique_lock&lt;std::__1::mutex&gt;) (2 samples, 0.22%; 0.00%)</title><rect x="629.0" y="197" width="2.6" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="631.97" y="207.5" ></text>
+</g>
+<g >
+<title>clickhouse#arena_extents_dirty_dalloc (1 samples, 0.11%; 0.00%)</title><rect x="850.2" y="149" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="853.22" y="159.5" ></text>
+</g>
+<g >
+<title>clickhouse#operator delete(void*, unsigned long) (1 samples, 0.11%; 0.00%)</title><rect x="856.8" y="165" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="859.81" y="175.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::FunctionToExecutableFunctionAdaptor::executeImpl(std::__1::vector&lt;DB::ColumnWithTypeAndName, std::__1::allocator&lt;DB::ColumnWithTypeAndName&gt; &gt; const&amp;, std::__1::shared_ptr&lt;DB::IDataType const&gt; const&amp;, unsigned long) const (12 samples, 1.34%; 0.00%)</title><rect x="858.1" y="149" width="15.8" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="861.13" y="159.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::makeNullable(COW&lt;DB::IColumn&gt;::immutable_ptr&lt;DB::IColumn&gt; const&amp;) (12 samples, 1.34%; +0.11%)</title><rect x="858.1" y="117" width="15.8" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="861.13" y="127.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::Block::eraseImpl(unsigned long) (1 samples, 0.11%; 0.00%)</title><rect x="856.8" y="181" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="859.81" y="191.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::PerfEventsCounters::initializeProfileEvents(std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; const&amp;) (1 samples, 0.11%; 0.00%)</title><rect x="617.1" y="261" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="620.12" y="271.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::ExpressionActions::execute(DB::Block&amp;, unsigned long&amp;, bool) const (1 samples, 0.11%; +0.11%)</title><rect x="11.3" y="389" width="1.3" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="14.32" y="399.5" ></text>
+</g>
+<g >
+<title>clickhouse#std::__1::chrono::system_clock::now() (3 samples, 0.33%; +0.11%)</title><rect x="1060.9" y="149" width="4.0" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="1063.94" y="159.5" ></text>
+</g>
+<g >
+<title>clickhouse#large_palloc (2 samples, 0.22%; 0.00%)</title><rect x="1055.7" y="133" width="2.6" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="1058.67" y="143.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::ISource::work() (146 samples, 16.29%; 0.00%)</title><rect x="876.6" y="229" width="192.2" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="879.56" y="239.5" >clickhouse#DB::ISource::w..</text>
+</g>
+<g >
+<title>clickhouse#Allocator&lt;false, false&gt;::allocNoTrack(unsigned long, unsigned long) (1 samples, 0.11%; 0.00%)</title><rect x="859.4" y="101" width="1.4" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="862.44" y="111.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::ISource::tryGenerate() (146 samples, 16.29%; 0.00%)</title><rect x="876.6" y="213" width="192.2" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="879.56" y="223.5" >clickhouse#DB::ISource::t..</text>
+</g>
+<g >
+<title>clickhouse#DB::IColumn::cut(unsigned long, unsigned long) const (1 samples, 0.11%; 0.00%)</title><rect x="627.7" y="149" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="630.66" y="159.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::AggregatingTransform::consume(DB::Chunk) (164 samples, 18.30%; 0.00%)</title><rect x="635.6" y="229" width="215.9" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="638.56" y="239.5" >clickhouse#DB::AggregatingTr..</text>
+</g>
+<g >
+<title>clickhouse#DB::Aggregator::prepareAggregateInstructions(std::__1::vector&lt;COW&lt;DB::IColumn&gt;::immutable_ptr&lt;DB::IColumn&gt;, std::__1::allocator&lt;COW&lt;DB::IColumn&gt;::immutable_ptr&lt;DB::IColumn&gt; &gt; &gt;, std::__1::vector&lt;std::__1::vector&lt;DB::IColumn const*, std::__1::allocator&lt;DB::IColumn const*&gt; &gt;, std::__1::allocator&lt;std::__1::vector&lt;DB::IColumn const*, std::__1::allocator&lt;DB::IColumn const*&gt; &gt; &gt; &gt;&amp;, std::__1::vector&lt;COW&lt;DB::IColumn&gt;::immutable_ptr&lt;DB::IColumn&gt;, std::__1::allocator&lt;COW&lt;DB::IColumn&gt;::immutable_ptr&lt;DB::IColumn&gt; &gt; &gt;&amp;, std::__1::vector&lt;DB::Aggregator::AggregateFunctionInstruction, std::__1::allocator&lt;DB::Aggregator::AggregateFunctionInstruction&gt; &gt;&amp;, std::__1::vector&lt;std::__1::vector&lt;DB::IColumn const*, std::__1::allocator&lt;DB::IColumn const*&gt; &gt;, std::__1::allocator&lt;std::__1::vector&lt;DB::IColumn const*, std::__1::allocator&lt;DB::IColumn const*&gt; &gt; &gt; &gt;&amp;) (2 samples, 0.22%; +0.11%)</title><rect x="847.6" y="197" width="2.6" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="850.59" y="207.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::LazyOutputFormat::getChunk(unsigned long) (457 samples, 51.00%; 0.00%)</title><rect x="15.3" y="213" width="601.8" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="18.27" y="223.5" >clickhouse#DB::LazyOutputFormat::getChunk(unsigned long)</text>
+</g>
+<g >
+<title>clickhouse#DB::TCPHandler::run() (457 samples, 51.00%; 0.00%)</title><rect x="15.3" y="293" width="601.8" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="18.27" y="303.5" >clickhouse#DB::TCPHandler::run()</text>
+</g>
+<g >
+<title>clickhouse#std::__1::deque&lt;DB::ExecutingGraph::Node*, std::__1::allocator&lt;DB::ExecutingGraph::Node*&gt; &gt;::__add_back_capacity() (1 samples, 0.11%; 0.00%)</title><rect x="632.9" y="213" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="635.92" y="223.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::AggregateFunctionNullUnary&lt;true, true&gt;::addBatchSinglePlace(unsigned long, char*, DB::IColumn const**, DB::Arena*, long) const (160 samples, 17.86%; 0.00%)</title><rect x="636.9" y="181" width="210.7" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="639.88" y="191.5" >clickhouse#DB::AggregateFun..</text>
+</g>
+<g >
+<title>clickhouse#void std::__1::__function::__policy_invoker&lt;void (DB::Progress const&amp;)&gt;::__call_impl&lt;std::__1::__function::__default_alloc_func&lt;DB::TCPHandler::runImpl()::$_0, void (DB::Progress const&amp;)&gt; &gt;(std::__1::__function::__policy_storage const*, DB::Progress const&amp;) (1 samples, 0.11%; +0.11%)</title><rect x="1064.9" y="165" width="1.3" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="1067.89" y="175.5" ></text>
+</g>
+<g >
+<title>clickhouse#__libc_malloc (1 samples, 0.11%; +0.11%)</title><rect x="630.3" y="165" width="1.3" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="633.29" y="175.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::IExecutableFunction::execute(std::__1::vector&lt;DB::ColumnWithTypeAndName, std::__1::allocator&lt;DB::ColumnWithTypeAndName&gt; &gt; const&amp;, std::__1::shared_ptr&lt;DB::IDataType const&gt; const&amp;, unsigned long, bool) const (12 samples, 1.34%; -0.11%)</title><rect x="858.1" y="181" width="15.8" height="15.0" fill="rgb(208,208,255)" rx="2" ry="2" />
+<text  x="861.13" y="191.5" ></text>
+</g>
+<g >
+<title>clickhouse#extents_remove_locked.llvm.1754257577532563842 (2 samples, 0.22%; +0.22%)</title><rect x="1055.7" y="85" width="2.6" height="15.0" fill="rgb(255,206,206)" rx="2" ry="2" />
+<text  x="1058.67" y="95.5" ></text>
+</g>
+<g >
+<title>all (896 samples, 100%)</title><rect x="10.0" y="405" width="1180.0" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="13.00" y="415.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::PipelineExecutor::prepareProcessor(unsigned long, unsigned long, std::__1::queue&lt;DB::ExecutingGraph::Node*, std::__1::deque&lt;DB::ExecutingGraph::Node*, std::__1::allocator&lt;DB::ExecutingGraph::Node*&gt; &gt; &gt;&amp;, std::__1::queue&lt;DB::ExecutingGraph::Node*, std::__1::deque&lt;DB::ExecutingGraph::Node*, std::__1::allocator&lt;DB::ExecutingGraph::Node*&gt; &gt; &gt;&amp;, std::__1::unique_lock&lt;std::__1::mutex&gt;) (10 samples, 1.12%; +0.11%)</title><rect x="621.1" y="261" width="13.1" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="624.07" y="271.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::LimitTransform::preparePair(DB::LimitTransform::PortsData&amp;) (1 samples, 0.11%; -0.11%)</title><rect x="627.7" y="181" width="1.3" height="15.0" fill="rgb(208,208,255)" rx="2" ry="2" />
+<text  x="630.66" y="191.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::SourceWithProgress::progress(DB::Progress const&amp;) (8 samples, 0.89%; +0.11%)</title><rect x="1058.3" y="181" width="10.5" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="1061.30" y="191.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::PipelineExecutor::prepareProcessor(unsigned long, unsigned long, std::__1::queue&lt;DB::ExecutingGraph::Node*, std::__1::deque&lt;DB::ExecutingGraph::Node*, std::__1::allocator&lt;DB::ExecutingGraph::Node*&gt; &gt; &gt;&amp;, std::__1::queue&lt;DB::ExecutingGraph::Node*, std::__1::deque&lt;DB::ExecutingGraph::Node*, std::__1::allocator&lt;DB::ExecutingGraph::Node*&gt; &gt; &gt;&amp;, std::__1::unique_lock&lt;std::__1::mutex&gt;) (7 samples, 0.78%; 0.00%)</title><rect x="625.0" y="229" width="9.2" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="628.02" y="239.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::ISimpleTransform::prepare() (1 samples, 0.11%; 0.00%)</title><rect x="625.0" y="213" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="628.02" y="223.5" ></text>
+</g>
+<g >
+<title>clickhouse#large_dalloc (1 samples, 0.11%; 0.00%)</title><rect x="850.2" y="165" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="853.22" y="175.5" ></text>
+</g>
+<g >
+<title>clickhouse#operator new(unsigned long) (1 samples, 0.11%; 0.00%)</title><rect x="630.3" y="181" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="633.29" y="191.5" ></text>
+</g>
+<g >
+<title>clickhouse#std::__1::__hash_table&lt;std::__1::__hash_value_type&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, unsigned long&gt;, std::__1::__unordered_map_hasher&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, std::__1::__hash_value_type&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, unsigned long&gt;, std::__1::hash&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; &gt;, std::__1::equal_to&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; &gt;, true&gt;, std::__1::__unordered_map_equal&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, std::__1::__hash_value_type&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, unsigned long&gt;, std::__1::equal_to&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; &gt;, std::__1::hash&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; &gt;, true&gt;, std::__1::allocator&lt;std::__1::__hash_value_type&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, unsigned long&gt; &gt; &gt;::__rehash(unsigned long) (1 samples, 0.11%; +0.11%)</title><rect x="851.5" y="165" width="1.4" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="854.54" y="175.5" ></text>
+</g>
+<g >
+<title>clickhouse#extent_record.llvm.1754257577532563842 (1 samples, 0.11%; 0.00%)</title><rect x="850.2" y="133" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="853.22" y="143.5" ></text>
+</g>
+<g >
+<title>clickhouse#std::__1::pair&lt;std::__1::__hash_iterator&lt;std::__1::__hash_node&lt;std::__1::__hash_value_type&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, unsigned long&gt;, void*&gt;*&gt;, bool&gt; std::__1::__hash_table&lt;std::__1::__hash_value_type&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, unsigned long&gt;, std::__1::__unordered_map_hasher&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, std::__1::__hash_value_type&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, unsigned long&gt;, std::__1::hash&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; &gt;, std::__1::equal_to&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; &gt;, true&gt;, std::__1::__unordered_map_equal&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, std::__1::__hash_value_type&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, unsigned long&gt;, std::__1::equal_to&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; &gt;, std::__1::hash&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; &gt;, true&gt;, std::__1::allocator&lt;std::__1::__hash_value_type&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, unsigned long&gt; &gt; &gt;::__emplace_unique_key_args&lt;std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;, std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;&amp;, unsigned long&gt;(std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; const&amp;, std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt;&amp;, unsigned long&amp;&amp;) (1 samples, 0.11%; -0.11%)</title><rect x="851.5" y="181" width="1.4" height="15.0" fill="rgb(208,208,255)" rx="2" ry="2" />
+<text  x="854.54" y="191.5" ></text>
+</g>
+<g >
+<title>clickhouse#sallocx (1 samples, 0.11%; +0.11%)</title><rect x="856.8" y="149" width="1.3" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="859.81" y="159.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::ColumnNullable::~ColumnNullable() (1 samples, 0.11%; -0.11%)</title><rect x="850.2" y="213" width="1.3" height="15.0" fill="rgb(208,208,255)" rx="2" ry="2" />
+<text  x="853.22" y="223.5" ></text>
+</g>
+<g >
+<title>clickhouse#void std::__1::vector&lt;DB::ColumnWithTypeAndName, std::__1::allocator&lt;DB::ColumnWithTypeAndName&gt; &gt;::__emplace_back_slow_path&lt;DB::ColumnWithTypeAndName const&amp;&gt;(DB::ColumnWithTypeAndName const&amp;) (1 samples, 0.11%; +0.11%)</title><rect x="875.2" y="181" width="1.4" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="878.25" y="191.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::PerfEventsCounters::processThreadLocalChanges(std::__1::basic_string&lt;char, std::__1::char_traits&lt;char&gt;, std::__1::allocator&lt;char&gt; &gt; const&amp;) (1 samples, 0.11%; 0.00%)</title><rect x="617.1" y="245" width="1.3" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="620.12" y="255.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::(anonymous namespace)::FunctionToNullable::executeImpl(std::__1::vector&lt;DB::ColumnWithTypeAndName, std::__1::allocator&lt;DB::ColumnWithTypeAndName&gt; &gt; const&amp;, std::__1::shared_ptr&lt;DB::IDataType const&gt; const&amp;, unsigned long) const (12 samples, 1.34%; 0.00%)</title><rect x="858.1" y="133" width="15.8" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="861.13" y="143.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::Aggregator::executeOnBlock(std::__1::vector&lt;COW&lt;DB::IColumn&gt;::immutable_ptr&lt;DB::IColumn&gt;, std::__1::allocator&lt;COW&lt;DB::IColumn&gt;::immutable_ptr&lt;DB::IColumn&gt; &gt; &gt;, unsigned long, DB::AggregatedDataVariants&amp;, std::__1::vector&lt;DB::IColumn const*, std::__1::allocator&lt;DB::IColumn const*&gt; &gt;&amp;, std::__1::vector&lt;std::__1::vector&lt;DB::IColumn const*, std::__1::allocator&lt;DB::IColumn const*&gt; &gt;, std::__1::allocator&lt;std::__1::vector&lt;DB::IColumn const*, std::__1::allocator&lt;DB::IColumn const*&gt; &gt; &gt; &gt;&amp;, bool&amp;) (163 samples, 18.19%; 0.00%)</title><rect x="635.6" y="213" width="214.6" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="638.56" y="223.5" >clickhouse#DB::Aggregator::e..</text>
+</g>
+<g >
+<title>clickhouse#DB::Aggregator::executeWithoutKeyImpl(char*&amp;, unsigned long, DB::Aggregator::AggregateFunctionInstruction*, DB::Arena*) (161 samples, 17.97%; +0.11%)</title><rect x="635.6" y="197" width="212.0" height="15.0" fill="rgb(255,208,208)" rx="2" ry="2" />
+<text  x="638.56" y="207.5" >clickhouse#DB::Aggregator::..</text>
+</g>
+<g >
+<title>clickhouse#extent_recycle.llvm.1754257577532563842 (2 samples, 0.22%; -0.11%)</title><rect x="1055.7" y="101" width="2.6" height="15.0" fill="rgb(208,208,255)" rx="2" ry="2" />
+<text  x="1058.67" y="111.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::EnabledQuota::used(std::__1::pair&lt;DB::Quota::ResourceType, unsigned long&gt; const&amp;, std::__1::pair&lt;DB::Quota::ResourceType, unsigned long&gt; const&amp;, bool) const (3 samples, 0.33%; -0.11%)</title><rect x="1060.9" y="165" width="4.0" height="15.0" fill="rgb(208,208,255)" rx="2" ry="2" />
+<text  x="1063.94" y="175.5" ></text>
+</g>
+<g >
+<title>clickhouse#DB::ExpressionTransform::transform(DB::Chunk&amp;) (19 samples, 2.12%; 0.00%)</title><rect x="851.5" y="213" width="25.1" height="15.0" fill="rgb(255,255,255)" rx="2" ry="2" />
+<text  x="854.54" y="223.5" >c..</text>
+</g>
+<g >
+<title>clickhouse#COW&lt;DB::IColumn&gt;::mutable_ptr&lt;DB::ColumnVector&lt;unsigned long&gt; &gt; COWHelper&lt;DB::ColumnVectorHelper, DB::ColumnVector&lt;unsigned long&gt; &gt;::create&lt;unsigned long&amp;&gt;(unsigned long&amp;) (2 samples, 0.22%; -0.11%)</title><rect x="1055.7" y="181" width="2.6" height="15.0" fill="rgb(208,208,255)" rx="2" ry="2" />
+<text  x="1058.67" y="191.5" ></text>
+</g>
+</g>
+</svg>
