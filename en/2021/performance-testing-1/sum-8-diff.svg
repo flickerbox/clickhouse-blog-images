@@ -25,12 +25,12 @@
 	"use strict";
 	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
 	function init(evt) {
-		details = document.getElementById("details").firstChild;
-		searchbtn = document.getElementById("search");
-		ignorecaseBtn = document.getElementById("ignorecase");
-		unzoombtn = document.getElementById("unzoom");
-		matchedtxt = document.getElementById("matched");
-		svg = document.getElementsByTagName("svg")[0];
+		details = window.document.getElementById("details").firstChild;
+		searchbtn = window.document.getElementById("search");
+		ignorecaseBtn = window.document.getElementById("ignorecase");
+		unzoombtn = window.document.getElementById("unzoom");
+		matchedtxt = window.document.getElementById("matched");
+		svg = window.document.getElementsByTagName("svg")[0];
 		searching = 0;
 		currentSearchTerm = null;
 	}
@@ -198,7 +198,7 @@
 
 		unzoombtn.classList.remove("hide");
 
-		var el = document.getElementById("frames").children;
+		var el = window.document.getElementById("frames").children;
 		for (var i = 0; i < el.length; i++) {
 			var e = el[i];
 			var a = find_child(e, "rect").attributes;
@@ -238,7 +238,7 @@
 	}
 	function unzoom() {
 		unzoombtn.classList.add("hide");
-		var el = document.getElementById("frames").children;
+		var el = window.document.getElementById("frames").children;
 		for(var i = 0; i < el.length; i++) {
 			el[i].classList.remove("parent");
 			el[i].classList.remove("hide");
@@ -260,7 +260,7 @@
 		search();
 	}
 	function reset_search() {
-		var el = document.querySelectorAll("#frames rect");
+		var el = window.document.querySelectorAll("#frames rect");
 		for (var i = 0; i < el.length; i++) {
 			orig_load(el[i], "fill")
 		}
@@ -290,7 +290,7 @@
 		var term = currentSearchTerm;
 
 		var re = new RegExp(term, ignorecase ? 'i' : '');
-		var el = document.getElementById("frames").children;
+		var el = window.document.getElementById("frames").children;
 		var matches = new Object();
 		var maxwidth = 0;
 		for (var i = 0; i < el.length; i++) {
